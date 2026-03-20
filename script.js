@@ -2427,6 +2427,54 @@ function handleWallpaperUpload(input) {
 // --- WeChat DB ---
 const WC_DB_NAME = 'WeChatSimDB';
 const WC_DB_VERSION = 3;
+const WC_CHARACTERS_BACKUP_KEY = 'ios_theme_wc_characters_backup_v1';
+
+function wcReadCharactersBackupSnapshot() {
+    try {
+        const raw = localStorage.getItem(WC_CHARACTERS_BACKUP_KEY);
+        if (!raw) return { updatedAt: 0, characters: [] };
+
+        const parsed = JSON.parse(raw);
+        const characters = Array.isArray(parsed)
+            ? parsed
+            : (Array.isArray(parsed?.characters) ? parsed.characters : []);
+
+        return {
+            updatedAt: Number(parsed?.updatedAt) || 0,
+            characters: characters.filter(char => char && typeof char === 'object' && char.id)
+        };
+    } catch (e) {
+        console.warn('联系人本地备份读取失败', e);
+        return { updatedAt: 0, characters: [] };
+    }
+}
+
+function wcWriteCharactersBackupSnapshot(updatedAt = Date.now()) {
+    try {
+        const characters = Array.isArray(wcState.characters)
+            ? wcState.characters.filter(char => char && typeof char === 'object' && char.id)
+            : [];
+
+        localStorage.setItem(WC_CHARACTERS_BACKUP_KEY, JSON.stringify({
+            updatedAt,
+            characters
+        }));
+    } catch (e) {
+        console.warn('联系人本地备份写入失败', e);
+    }
+
+    return updatedAt;
+}
+
+async function wcRestoreCharactersFromBackup(characters) {
+    if (!Array.isArray(characters) || characters.length === 0) return;
+
+    for (const char of characters) {
+        if (char && char.id) {
+            await wcDb.put('characters', char);
+        }
+    }
+}
 
 const wcDb = {
     instance: null,
@@ -2613,8 +2661,24 @@ async function wcLoadData() {
         const unread = await wcDb.get('kv_store', 'unread_counts').catch(() => null);
         if (unread) wcState.unreadCounts = unread;
 
+        const charsUpdatedAt = await wcDb.get('kv_store', 'characters_updated_at').catch(() => 0);
         const chars = await wcDb.getAll('characters').catch(() => []);
-        wcState.characters = chars || [];
+        const charBackupSnapshot = wcReadCharactersBackupSnapshot();
+        const shouldUseBackupCharacters = charBackupSnapshot.characters.length > 0 && (
+            !Array.isArray(chars) || chars.length === 0 ||
+            charBackupSnapshot.updatedAt >= (Number(charsUpdatedAt) || 0) ||
+            charBackupSnapshot.characters.length > chars.length
+        );
+
+        if (shouldUseBackupCharacters) {
+            wcState.characters = charBackupSnapshot.characters;
+            await wcRestoreCharactersFromBackup(charBackupSnapshot.characters);
+        } else {
+            wcState.characters = chars || [];
+            if (wcState.characters.length > 0) {
+                wcWriteCharactersBackupSnapshot(Number(charsUpdatedAt) || Date.now());
+            }
+        }
         
         wcState.masks = await wcDb.getAll('masks').catch(() => []) || [];
         wcState.moments = await wcDb.getAll('moments').catch(() => []) || [];
@@ -2631,6 +2695,8 @@ async function wcLoadData() {
 }
 
 async function wcSaveData() {
+    const charactersUpdatedAt = wcWriteCharactersBackupSnapshot();
+
     try {
         await wcDb.open();
         if (!wcDb.instance) return;
@@ -2664,6 +2730,7 @@ async function wcSaveData() {
             store.put(wcState.chatBgPresets || [], 'chat_bg_presets');
             store.put(wcState.phonePresets || [], 'phone_presets');
             store.put(wcState.shopData || {}, 'shop_data');
+            store.put(charactersUpdatedAt, 'characters_updated_at');
         }).catch(e => console.warn("kv_store 保存异常", e));
 
         // 2. 保存 characters (你的角色数据)
@@ -6419,6 +6486,7 @@ async function wcSaveGroupChat() {
     };
 
     wcState.characters.push(newGroup);
+    await wcDb.put('characters', newGroup);
     await wcSaveData();
     wcCloseModal('wc-modal-add-group');
     wcRenderAll();
@@ -6629,6 +6697,7 @@ async function wcSaveCharacter() {
         avatar: wcState.tempImage || defaultAvatar, isPinned: false
     };
     wcState.characters.push(newChar);
+    await wcDb.put('characters', newChar);
     await wcSaveData();
     wcCloseModal('wc-modal-add-char');
     wcRenderAll();
@@ -6789,14 +6858,15 @@ function wcOpenEditCharSettings() {
     wcOpenModal('wc-modal-edit-char-settings');
 }
 
-function wcUpdateCharacter() {
+async function wcUpdateCharacter() {
     const char = wcState.characters.find(c => c.id === wcState.editingCharId);
     if (!char) return;
     char.name = document.getElementById('wc-edit-char-name').value;
     char.note = document.getElementById('wc-edit-char-note').value;
     char.prompt = document.getElementById('wc-edit-char-prompt').value;
     if (wcState.tempImage && wcState.tempImageType === 'edit-char') char.avatar = wcState.tempImage;
-    wcSaveData();
+    await wcDb.put('characters', char);
+    await wcSaveData();
     wcCloseModal('wc-modal-edit-char-settings');
     document.getElementById('wc-detail-char-avatar').src = char.avatar;
     document.getElementById('wc-detail-char-name').innerText = char.name;
@@ -8480,7 +8550,7 @@ function wcDeletePhoneContact() {
     }
 }
 
-function wcShareContactToMain() {
+async function wcShareContactToMain() {
     if (!currentPhoneContact) return;
     
     const name = currentPhoneContact.name;
@@ -8497,7 +8567,8 @@ function wcShareContactToMain() {
     };
     
     wcState.characters.push(newChar);
-    wcSaveData();
+    await wcDb.put('characters', newChar);
+    await wcSaveData();
     
     const char = wcState.characters.find(c => c.id === wcState.editingCharId);
     // 核心修改：明确告诉 AI 是 User 添加了好友，而不是 AI 自己添加的
@@ -8771,7 +8842,7 @@ function wcClearChatBackground() {
     wcState.tempBgCleared = true;
 }
 
-function wcSaveChatSettings() {
+async function wcSaveChatSettings() {
     const char = wcState.characters.find(c => c.id === wcState.activeChatId);
     if (!char) return;
     
@@ -8819,7 +8890,8 @@ function wcSaveChatSettings() {
     if (charIndex !== -1) {
         wcState.characters[charIndex] = char;
     }
-    wcSaveData();
+    await wcDb.put('characters', char);
+    await wcSaveData();
     
     let displayName = char.note || char.name;
     // 【新增】：如果是群聊，在名字后面加上人数
