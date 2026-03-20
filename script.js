@@ -303,7 +303,11 @@ window.onload = async function() {
 
     // 初始化 WeChat DB
     try {
-        await wcDb.init();
+        try {
+            await wcDb.init();
+        } catch (e) {
+            console.error("WeChat DB Init failed", e);
+        }
         await wcLoadData();
         wcRenderAll();
         wcSwitchTab('chat');
@@ -318,7 +322,7 @@ window.onload = async function() {
         await musicInitState();
         
     } catch (e) {
-        console.error("WeChat DB Init failed", e);
+        console.error("WeChat Data bootstrap failed", e);
     }
     
     // WeChat 全局点击隐藏菜单
@@ -2686,50 +2690,57 @@ function closeWechat() {
 }
 
 async function wcLoadData() {
+    const persistentCharactersSnapshot = await wcReadCharactersPersistentSnapshot();
+    if (persistentCharactersSnapshot.characters.length > 0) {
+        wcState.characters = persistentCharactersSnapshot.characters;
+    }
+
     try {
-        const myFavs = await wcDb.get('kv_store', 'my_favorites').catch(() => null);
+        const safeGet = async (storeName, key) => await wcDb.get(storeName, key).catch(() => null);
+        const safeGetAll = async (storeName) => await wcDb.getAll(storeName).catch(() => []);
+
+        const myFavs = await safeGet('kv_store', 'my_favorites');
         if (myFavs) wcState.myFavorites = myFavs;
         
-        const calEvents = await wcDb.get('kv_store', 'calendar_events').catch(() => null);
+        const calEvents = await safeGet('kv_store', 'calendar_events');
         if (calEvents) wcState.calendarEvents = calEvents;
 
-        const user = await wcDb.get('kv_store', 'user').catch(() => null);
+        const user = await safeGet('kv_store', 'user');
         if (user) wcState.user = user;
         else wcState.user.avatar = 'https://i.postimg.cc/yYrDHvG5/mmexport1766982633245.jpg';
 
-        const wallet = await wcDb.get('kv_store', 'wallet').catch(() => null);
+        const wallet = await safeGet('kv_store', 'wallet');
         if (wallet) wcState.wallet = wallet;
 
-        const stickers = await wcDb.get('kv_store', 'sticker_categories').catch(() => null);
+        const stickers = await safeGet('kv_store', 'sticker_categories');
         if (stickers) wcState.stickerCategories = stickers;
 
-        const presets = await wcDb.get('kv_store', 'css_presets').catch(() => null);
+        const presets = await safeGet('kv_store', 'css_presets');
         if (presets) wcState.cssPresets = presets;
         
-        const chatBgs = await wcDb.get('kv_store', 'chat_bg_presets').catch(() => null);
+        const chatBgs = await safeGet('kv_store', 'chat_bg_presets');
         if (chatBgs) wcState.chatBgPresets = chatBgs;
         
-        const phonePresets = await wcDb.get('kv_store', 'phone_presets').catch(() => null);
+        const phonePresets = await safeGet('kv_store', 'phone_presets');
         if (phonePresets) wcState.phonePresets = phonePresets;
         
-        const shopData = await wcDb.get('kv_store', 'shop_data').catch(() => null);
+        const shopData = await safeGet('kv_store', 'shop_data');
         if (shopData) wcState.shopData = shopData;
         
-        const unread = await wcDb.get('kv_store', 'unread_counts').catch(() => null);
+        const unread = await safeGet('kv_store', 'unread_counts');
         if (unread) wcState.unreadCounts = unread;
 
-        const charsUpdatedAt = await wcDb.get('kv_store', 'characters_updated_at').catch(() => 0);
-        const chars = await wcDb.getAll('characters').catch(() => []);
-        const charBackupSnapshot = await wcReadCharactersPersistentSnapshot();
-        const shouldUseBackupCharacters = charBackupSnapshot.characters.length > 0 && (
+        const charsUpdatedAt = await safeGet('kv_store', 'characters_updated_at');
+        const chars = await safeGetAll('characters');
+        const shouldUseBackupCharacters = persistentCharactersSnapshot.characters.length > 0 && (
             !Array.isArray(chars) || chars.length === 0 ||
-            charBackupSnapshot.updatedAt >= (Number(charsUpdatedAt) || 0) ||
-            charBackupSnapshot.characters.length > chars.length
+            persistentCharactersSnapshot.updatedAt >= (Number(charsUpdatedAt) || 0) ||
+            persistentCharactersSnapshot.characters.length > chars.length
         );
 
         if (shouldUseBackupCharacters) {
-            wcState.characters = charBackupSnapshot.characters;
-            await wcRestoreCharactersFromBackup(charBackupSnapshot.characters);
+            wcState.characters = persistentCharactersSnapshot.characters;
+            await wcRestoreCharactersFromBackup(persistentCharactersSnapshot.characters);
         } else {
             wcState.characters = chars || [];
             if (wcState.characters.length > 0) {
@@ -2737,10 +2748,10 @@ async function wcLoadData() {
             }
         }
         
-        wcState.masks = await wcDb.getAll('masks').catch(() => []) || [];
-        wcState.moments = await wcDb.getAll('moments').catch(() => []) || [];
+        wcState.masks = await safeGetAll('masks') || [];
+        wcState.moments = await safeGetAll('moments') || [];
         
-        const allChats = await wcDb.getAll('chats').catch(() => []);
+        const allChats = await safeGetAll('chats');
         if (allChats) {
             allChats.forEach(item => {
                 wcState.chats[item.charId] = item.messages;
