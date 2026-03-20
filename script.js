@@ -2427,6 +2427,7 @@ function handleWallpaperUpload(input) {
 // --- WeChat DB ---
 const WC_DB_NAME = 'WeChatSimDB';
 const WC_DB_VERSION = 3;
+const WC_CHARACTERS_DURABLE_KEY = 'ios_theme_wc_characters_store_v1';
 const WC_CHARACTERS_BACKUP_KEY = 'ios_theme_wc_characters_backup_v1';
 
 function wcReadCharactersBackupSnapshot() {
@@ -2461,6 +2462,52 @@ function wcWriteCharactersBackupSnapshot(updatedAt = Date.now()) {
         }));
     } catch (e) {
         console.warn('联系人本地备份写入失败', e);
+    }
+
+    return updatedAt;
+}
+
+async function wcReadCharactersPersistentSnapshot() {
+    let snapshot = null;
+
+    if (window.localforage && typeof window.localforage.getItem === 'function') {
+        try {
+            snapshot = await window.localforage.getItem(WC_CHARACTERS_DURABLE_KEY);
+        } catch (e) {
+            console.warn('联系人持久存储读取失败', e);
+        }
+    }
+
+    if (!snapshot) {
+        snapshot = wcReadCharactersBackupSnapshot();
+    }
+
+    const characters = Array.isArray(snapshot)
+        ? snapshot
+        : (Array.isArray(snapshot?.characters) ? snapshot.characters : []);
+
+    return {
+        updatedAt: Number(snapshot?.updatedAt) || 0,
+        characters: characters.filter(char => char && typeof char === 'object' && char.id)
+    };
+}
+
+async function wcWriteCharactersPersistentSnapshot(updatedAt = Date.now()) {
+    const snapshot = {
+        updatedAt,
+        characters: Array.isArray(wcState.characters)
+            ? wcState.characters.filter(char => char && typeof char === 'object' && char.id)
+            : []
+    };
+
+    wcWriteCharactersBackupSnapshot(updatedAt);
+
+    if (window.localforage && typeof window.localforage.setItem === 'function') {
+        try {
+            await window.localforage.setItem(WC_CHARACTERS_DURABLE_KEY, snapshot);
+        } catch (e) {
+            console.warn('联系人持久存储写入失败', e);
+        }
     }
 
     return updatedAt;
@@ -2616,6 +2663,16 @@ const wcState = {
     }
 };
 
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        wcWriteCharactersBackupSnapshot();
+    }
+});
+
+window.addEventListener('pagehide', () => {
+    wcWriteCharactersBackupSnapshot();
+});
+
 
 // --- WeChat Core Functions ---
 function openWechat() {
@@ -2663,7 +2720,7 @@ async function wcLoadData() {
 
         const charsUpdatedAt = await wcDb.get('kv_store', 'characters_updated_at').catch(() => 0);
         const chars = await wcDb.getAll('characters').catch(() => []);
-        const charBackupSnapshot = wcReadCharactersBackupSnapshot();
+        const charBackupSnapshot = await wcReadCharactersPersistentSnapshot();
         const shouldUseBackupCharacters = charBackupSnapshot.characters.length > 0 && (
             !Array.isArray(chars) || chars.length === 0 ||
             charBackupSnapshot.updatedAt >= (Number(charsUpdatedAt) || 0) ||
@@ -2676,7 +2733,7 @@ async function wcLoadData() {
         } else {
             wcState.characters = chars || [];
             if (wcState.characters.length > 0) {
-                wcWriteCharactersBackupSnapshot(Number(charsUpdatedAt) || Date.now());
+                await wcWriteCharactersPersistentSnapshot(Number(charsUpdatedAt) || Date.now());
             }
         }
         
@@ -2695,7 +2752,7 @@ async function wcLoadData() {
 }
 
 async function wcSaveData() {
-    const charactersUpdatedAt = wcWriteCharactersBackupSnapshot();
+    const charactersUpdatedAt = await wcWriteCharactersPersistentSnapshot();
 
     try {
         await wcDb.open();
