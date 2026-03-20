@@ -991,6 +991,15 @@ async function exportAllData() {
         // 2. 导出 WeChat 数据
         const wechatData = {};
         if (wcDb.instance) {
+            const persistentCharactersSnapshot = await wcReadCharactersPersistentSnapshot();
+            const dbCharacters = await wcDb.getAll('characters');
+            const charsUpdatedAt = await wcDb.get('kv_store', 'characters_updated_at');
+            const shouldUseSnapshotCharacters = persistentCharactersSnapshot.characters.length > 0 && (
+                !Array.isArray(dbCharacters) || dbCharacters.length === 0 ||
+                persistentCharactersSnapshot.updatedAt >= (Number(charsUpdatedAt) || 0) ||
+                persistentCharactersSnapshot.characters.length > dbCharacters.length
+            );
+
             wechatData.user = await wcDb.get('kv_store', 'user');
             wechatData.wallet = await wcDb.get('kv_store', 'wallet');
             wechatData.stickerCategories = await wcDb.get('kv_store', 'sticker_categories');
@@ -998,7 +1007,7 @@ async function exportAllData() {
             wechatData.chatBgPresets = await wcDb.get('kv_store', 'chat_bg_presets');
             wechatData.phonePresets = await wcDb.get('kv_store', 'phone_presets');
             wechatData.shopData = await wcDb.get('kv_store', 'shop_data');
-            wechatData.characters = await wcDb.getAll('characters');
+            wechatData.characters = shouldUseSnapshotCharacters ? persistentCharactersSnapshot.characters : (dbCharacters || []);
             wechatData.masks = await wcDb.getAll('masks');
             wechatData.moments = await wcDb.getAll('moments');
             
@@ -1071,6 +1080,9 @@ function importAllData(input) {
                 // 2. 恢复 WeChat 数据 (如果存在)
                 if (data['wechat_backup']) {
                     const wd = data['wechat_backup'];
+                    const importedCharacters = Array.isArray(wd.characters) ? wd.characters : [];
+                    const charactersUpdatedAt = Date.now();
+
                     if (wd.user) await wcDb.put('kv_store', wd.user, 'user');
                     if (wd.wallet) await wcDb.put('kv_store', wd.wallet, 'wallet');
                     if (wd.stickerCategories) await wcDb.put('kv_store', wd.stickerCategories, 'sticker_categories');
@@ -1082,11 +1094,10 @@ function importAllData(input) {
                     // 清空旧表并写入新数据
                     const stores = ['characters', 'masks', 'moments', 'chats'];
                     for (const store of stores) {
-                        const tx = wcDb.instance.transaction([store], 'readwrite');
-                        await tx.objectStore(store).clear();
+                        await wcClearStore(store);
                     }
 
-                    if (wd.characters) for (const c of wd.characters) await wcDb.put('characters', c);
+                    for (const c of importedCharacters) await wcDb.put('characters', c);
                     if (wd.masks) for (const m of wd.masks) await wcDb.put('masks', m);                 
                     if (wd.moments) for (const m of wd.moments) await wcDb.put('moments', m);
                     if (wd.chats) {
@@ -1097,6 +1108,8 @@ function importAllData(input) {
                             }
                         }
                     }
+
+                    await wcSyncCharactersSnapshotFromList(importedCharacters, charactersUpdatedAt);
                 }
 
                 // 3. 恢复恋人空间数据
@@ -1224,9 +1237,11 @@ function clearAllData() {
             if (typeof wcDb !== 'undefined' && wcDb.instance) {
                 const stores = ['kv_store', 'characters', 'chats', 'moments', 'masks'];
                 for (const store of stores) {
-                    const tx = wcDb.instance.transaction([store], 'readwrite');
-                    tx.objectStore(store).clear();
+                    await wcClearStore(store);
                 }
+            }
+            if (typeof wcClearCharactersPersistentSnapshot === 'function') {
+                await wcClearCharactersPersistentSnapshot();
             }
             // 【V2修改点：保留新的激活状态】
             const isActivated = localStorage.getItem('ios_theme_activation_v2_fallback');
@@ -2471,6 +2486,25 @@ function wcWriteCharactersBackupSnapshot(updatedAt = Date.now()) {
     return updatedAt;
 }
 
+function wcSanitizeCharactersSnapshot(characters) {
+    return Array.isArray(characters)
+        ? characters.filter(char => char && typeof char === 'object' && char.id)
+        : [];
+}
+
+function wcWriteCharactersBackupSnapshotFromList(characters, updatedAt = Date.now()) {
+    try {
+        localStorage.setItem(WC_CHARACTERS_BACKUP_KEY, JSON.stringify({
+            updatedAt,
+            characters: wcSanitizeCharactersSnapshot(characters)
+        }));
+    } catch (e) {
+        console.warn('联系人本地备份写入失败', e);
+    }
+
+    return updatedAt;
+}
+
 async function wcReadCharactersPersistentSnapshot() {
     let snapshot = null;
 
@@ -2497,14 +2531,16 @@ async function wcReadCharactersPersistentSnapshot() {
 }
 
 async function wcWriteCharactersPersistentSnapshot(updatedAt = Date.now()) {
+    return wcWriteCharactersPersistentSnapshotFromList(wcState.characters, updatedAt);
+}
+
+async function wcWriteCharactersPersistentSnapshotFromList(characters, updatedAt = Date.now()) {
     const snapshot = {
         updatedAt,
-        characters: Array.isArray(wcState.characters)
-            ? wcState.characters.filter(char => char && typeof char === 'object' && char.id)
-            : []
+        characters: wcSanitizeCharactersSnapshot(characters)
     };
 
-    wcWriteCharactersBackupSnapshot(updatedAt);
+    wcWriteCharactersBackupSnapshotFromList(snapshot.characters, updatedAt);
 
     if (window.localforage && typeof window.localforage.setItem === 'function') {
         try {
@@ -2512,6 +2548,40 @@ async function wcWriteCharactersPersistentSnapshot(updatedAt = Date.now()) {
         } catch (e) {
             console.warn('联系人持久存储写入失败', e);
         }
+    }
+
+    return updatedAt;
+}
+
+async function wcClearCharactersPersistentSnapshot() {
+    try {
+        localStorage.removeItem(WC_CHARACTERS_BACKUP_KEY);
+    } catch (e) {
+        console.warn('联系人本地备份清除失败', e);
+    }
+
+    if (window.localforage && typeof window.localforage.removeItem === 'function') {
+        try {
+            await window.localforage.removeItem(WC_CHARACTERS_DURABLE_KEY);
+        } catch (e) {
+            console.warn('联系人持久存储清除失败', e);
+        }
+    }
+}
+
+async function wcSyncCharactersSnapshotFromList(characters, updatedAt = Date.now()) {
+    const safeCharacters = wcSanitizeCharactersSnapshot(characters);
+
+    if (safeCharacters.length > 0) {
+        await wcWriteCharactersPersistentSnapshotFromList(safeCharacters, updatedAt);
+    } else {
+        await wcClearCharactersPersistentSnapshot();
+    }
+
+    try {
+        await wcDb.put('kv_store', updatedAt, 'characters_updated_at');
+    } catch (e) {
+        console.warn('联系人版本戳写入失败', e);
     }
 
     return updatedAt;
@@ -2525,6 +2595,19 @@ async function wcRestoreCharactersFromBackup(characters) {
             await wcDb.put('characters', char);
         }
     }
+}
+
+function wcClearStore(storeName) {
+    return new Promise((resolve, reject) => {
+        if (!wcDb.instance || !wcDb.instance.objectStoreNames.contains(storeName)) {
+            return resolve();
+        }
+
+        const tx = wcDb.instance.transaction([storeName], 'readwrite');
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.objectStore(storeName).clear();
+    });
 }
 
 const wcDb = {
@@ -6090,6 +6173,15 @@ async function wcExportData() {
         }
 
         const data = {};
+        const persistentCharactersSnapshot = await wcReadCharactersPersistentSnapshot();
+        const dbCharacters = await wcDb.getAll('characters');
+        const charsUpdatedAt = await wcDb.get('kv_store', 'characters_updated_at');
+        const shouldUseSnapshotCharacters = persistentCharactersSnapshot.characters.length > 0 && (
+            !Array.isArray(dbCharacters) || dbCharacters.length === 0 ||
+            persistentCharactersSnapshot.updatedAt >= (Number(charsUpdatedAt) || 0) ||
+            persistentCharactersSnapshot.characters.length > dbCharacters.length
+        );
+
         data.user = await wcDb.get('kv_store', 'user');
         data.wallet = await wcDb.get('kv_store', 'wallet');
         data.stickerCategories = await wcDb.get('kv_store', 'sticker_categories');
@@ -6097,7 +6189,7 @@ async function wcExportData() {
         data.chatBgPresets = await wcDb.get('kv_store', 'chat_bg_presets');
         data.phonePresets = await wcDb.get('kv_store', 'phone_presets');
         data.shopData = await wcDb.get('kv_store', 'shop_data');
-        data.characters = await wcDb.getAll('characters');
+        data.characters = shouldUseSnapshotCharacters ? persistentCharactersSnapshot.characters : (dbCharacters || []);
         data.masks = await wcDb.getAll('masks');
         data.moments = await wcDb.getAll('moments');
         
@@ -6141,6 +6233,9 @@ function wcImportData(input) {
             if (json.signature !== 'wechat_sim_backup') return alert("导入失败：文件格式不正确。");
             if (confirm("这将覆盖当前 WeChat 的所有数据，确定要恢复吗？")) {
                 const data = json.data;
+                const importedCharacters = Array.isArray(data.characters) ? data.characters : [];
+                const charactersUpdatedAt = Date.now();
+
                 if (data.myFavorites) await wcDb.put('kv_store', data.myFavorites, 'my_favorites');
                 if (data.user) await wcDb.put('kv_store', data.user, 'user');
                 if (data.wallet) await wcDb.put('kv_store', data.wallet, 'wallet');
@@ -6152,11 +6247,10 @@ function wcImportData(input) {
                 
                 const stores = ['characters', 'masks', 'moments', 'chats'];
                 for (const store of stores) {
-                    const tx = wcDb.instance.transaction([store], 'readwrite');
-                    await tx.objectStore(store).clear();
+                    await wcClearStore(store);
                 }
 
-                if (data.characters) for (const c of data.characters) await wcDb.put('characters', c);
+                for (const c of importedCharacters) await wcDb.put('characters', c);
                 if (data.masks) for (const m of data.masks) await wcDb.put('masks', m);
                 if (data.moments) for (const m of data.moments) await wcDb.put('moments', m);
                 if (data.chats) {
@@ -6167,6 +6261,8 @@ function wcImportData(input) {
                         }
                     }
                 }
+
+                await wcSyncCharactersSnapshotFromList(importedCharacters, charactersUpdatedAt);
                 
                 alert("WeChat 数据恢复成功，页面将刷新。");
                 location.reload();
@@ -6181,9 +6277,9 @@ async function wcClearData() {
     if (confirm("警告：此操作将永久删除 WeChat 的所有数据！确定要继续吗？")) {
         const stores = ['kv_store', 'characters', 'chats', 'moments', 'masks'];
         for (const store of stores) {
-            const tx = wcDb.instance.transaction([store], 'readwrite');
-            tx.objectStore(store).clear();
+            await wcClearStore(store);
         }
+        await wcClearCharactersPersistentSnapshot();
         alert("WeChat 数据已清空，页面将重置。");
         location.reload();
     }
@@ -6554,7 +6650,12 @@ async function wcSaveGroupChat() {
     };
 
     wcState.characters.push(newGroup);
-    await wcDb.put('characters', newGroup);
+    await wcWriteCharactersPersistentSnapshot();
+    try {
+        await wcDb.put('characters', newGroup);
+    } catch (e) {
+        console.warn('群聊联系人写入 IndexedDB 失败，已保留本地兜底快照', e);
+    }
     await wcSaveData();
     wcCloseModal('wc-modal-add-group');
     wcRenderAll();
@@ -6765,7 +6866,12 @@ async function wcSaveCharacter() {
         avatar: wcState.tempImage || defaultAvatar, isPinned: false
     };
     wcState.characters.push(newChar);
-    await wcDb.put('characters', newChar);
+    await wcWriteCharactersPersistentSnapshot();
+    try {
+        await wcDb.put('characters', newChar);
+    } catch (e) {
+        console.warn('联系人写入 IndexedDB 失败，已保留本地兜底快照', e);
+    }
     await wcSaveData();
     wcCloseModal('wc-modal-add-char');
     wcRenderAll();
@@ -6933,7 +7039,12 @@ async function wcUpdateCharacter() {
     char.note = document.getElementById('wc-edit-char-note').value;
     char.prompt = document.getElementById('wc-edit-char-prompt').value;
     if (wcState.tempImage && wcState.tempImageType === 'edit-char') char.avatar = wcState.tempImage;
-    await wcDb.put('characters', char);
+    await wcWriteCharactersPersistentSnapshot();
+    try {
+        await wcDb.put('characters', char);
+    } catch (e) {
+        console.warn('联系人更新写入 IndexedDB 失败，已保留本地兜底快照', e);
+    }
     await wcSaveData();
     wcCloseModal('wc-modal-edit-char-settings');
     document.getElementById('wc-detail-char-avatar').src = char.avatar;
@@ -8635,7 +8746,12 @@ async function wcShareContactToMain() {
     };
     
     wcState.characters.push(newChar);
-    await wcDb.put('characters', newChar);
+    await wcWriteCharactersPersistentSnapshot();
+    try {
+        await wcDb.put('characters', newChar);
+    } catch (e) {
+        console.warn('主聊天联系人写入 IndexedDB 失败，已保留本地兜底快照', e);
+    }
     await wcSaveData();
     
     const char = wcState.characters.find(c => c.id === wcState.editingCharId);
@@ -8958,7 +9074,12 @@ async function wcSaveChatSettings() {
     if (charIndex !== -1) {
         wcState.characters[charIndex] = char;
     }
-    await wcDb.put('characters', char);
+    await wcWriteCharactersPersistentSnapshot();
+    try {
+        await wcDb.put('characters', char);
+    } catch (e) {
+        console.warn('聊天联系人配置写入 IndexedDB 失败，已保留本地兜底快照', e);
+    }
     await wcSaveData();
     
     let displayName = char.note || char.name;
