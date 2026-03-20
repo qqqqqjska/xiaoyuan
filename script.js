@@ -2573,6 +2573,7 @@ const wcState = {
 function openWechat() {
     document.getElementById('wechatModal').classList.add('open');
     wcRenderAll();
+    wcSwitchTab('chat');
 }
 
 function closeWechat() {
@@ -2589,7 +2590,7 @@ async function wcLoadData() {
 
         const user = await wcDb.get('kv_store', 'user').catch(() => null);
         if (user) wcState.user = user;
-        else wcState.user.avatar = 'data:image/svg+xml;base64,' + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><rect width="100" height="100" fill="#007AFF"/></svg>');
+        else wcState.user.avatar = 'https://i.postimg.cc/yYrDHvG5/mmexport1766982633245.jpg';
 
         const wallet = await wcDb.get('kv_store', 'wallet').catch(() => null);
         if (wallet) wcState.wallet = wallet;
@@ -6391,7 +6392,7 @@ function wcOpenAddGroupModal() {
     wcOpenModal('wc-modal-add-group');
 }
 
-function wcSaveGroupChat() {
+async function wcSaveGroupChat() {
     const name = document.getElementById('wc-input-group-name').value.trim();
     if (!name) return alert('请输入群聊名称');
 
@@ -6418,7 +6419,7 @@ function wcSaveGroupChat() {
     };
 
     wcState.characters.push(newGroup);
-    wcSaveData();
+    await wcSaveData();
     wcCloseModal('wc-modal-add-group');
     wcRenderAll();
 }
@@ -6614,7 +6615,7 @@ function wcManageGroupMembers(action) {
     wcOpenModal('wc-modal-manage-group-members');
 }
 
-function wcSaveCharacter() {
+async function wcSaveCharacter() {
     const name = document.getElementById('wc-input-char-name').value;
     const note = document.getElementById('wc-input-char-note').value;
     const prompt = document.getElementById('wc-input-char-prompt').value;
@@ -6628,7 +6629,7 @@ function wcSaveCharacter() {
         avatar: wcState.tempImage || defaultAvatar, isPinned: false
     };
     wcState.characters.push(newChar);
-    wcSaveData();
+    await wcSaveData();
     wcCloseModal('wc-modal-add-char');
     wcRenderAll();
 }
