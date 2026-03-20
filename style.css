@@ -6877,6 +6877,11 @@ input::-webkit-inner-spin-button {
 }
 
 .ios-standalone .settings-modal {
+    padding-top: 0 !important;
+}
+
+.ios-standalone .settings-header {
+    height: calc(50px + env(safe-area-inset-top, 20px)) !important;
     padding-top: env(safe-area-inset-top, 20px) !important;
 }
 
