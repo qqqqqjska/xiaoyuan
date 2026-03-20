@@ -6876,7 +6876,10 @@ input::-webkit-inner-spin-button {
     height: calc(60px + env(safe-area-inset-bottom)) !important;
 }
 
-.ios-standalone .settings-modal,
+.ios-standalone .settings-modal {
+    padding-top: env(safe-area-inset-top, 20px) !important;
+}
+
 .ios-standalone .dream-fullscreen-view,
 .ios-standalone #wc-view-phone-sim,
 .ios-standalone #wc-view-shopping {
